@@ -3,15 +3,19 @@
  *--------------------------------------------------------*/
 
 import {
-	Logger, logger,
 	DebugSession, LoggingDebugSession,
 	InitializedEvent, TerminatedEvent, StoppedEvent, BreakpointEvent, OutputEvent,
 	Thread, StackFrame, Scope, Source, Handles, Breakpoint
 } from 'vscode-debugadapter';
 import {DebugProtocol} from 'vscode-debugprotocol';
-import {readFileSync} from 'fs';
+import {
+	readFileSync
+} from 'fs';
 import {basename} from 'path';
-
+import {JdbAttachRequest} from './Contracts/AttachRequest';
+import {JavaDebugger} from './JavaDebugger';
+import {pause, resume} from './ExecutionControl';
+import {getThreads} from './Threads';
 
 /**
  * This interface should always match the schema found in the mock-debug extension manifest.
@@ -24,6 +28,9 @@ export interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArgum
 	/** enable logging the Debug Adapter Protocol */
 	trace?: boolean;
 }
+
+
+
 
 class MockDebugSession extends LoggingDebugSession {
 
@@ -54,6 +61,16 @@ class MockDebugSession extends LoggingDebugSession {
 	private _breakPoints = new Map<string, DebugProtocol.Breakpoint[]>();
 
 	private _variableHandles = new Handles<string>();
+
+	private _debugger: JavaDebugger | null = null;
+
+	private get debugger(): JavaDebugger {
+		if (this._debugger === null) {
+			throw new Error("Bugcheck: no attached debugger.");
+		}
+
+		return this._debugger;
+	}
 
 	/**
 	 * Creates a new debug adapter that is used for one debug session.
@@ -93,23 +110,51 @@ class MockDebugSession extends LoggingDebugSession {
 	}
 
 	protected launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments): void {
+	}
 
-		// make sure to 'Stop' the buffered logging if 'trace' is not set
-		logger.setup(args.trace ? Logger.LogLevel.Verbose : Logger.LogLevel.Stop, false);
-
-		this._sourceFile = args.program;
-		this._sourceLines = readFileSync(this._sourceFile).toString().split('\n');
-
-		if (args.stopOnEntry) {
-			this._currentLine = 0;
-			this.sendResponse(response);
-
-			// we stop on the first line
-			this.sendEvent(new StoppedEvent("entry", MockDebugSession.THREAD_ID));
-		} else {
-			// we just start to run until we hit a breakpoint or an exception
-			this.continueRequest(<DebugProtocol.ContinueResponse>response, { threadId: MockDebugSession.THREAD_ID });
+	protected disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments): void {
+		if (this._debugger) {
+			this._debugger.kill();
 		}
+
+		response.success = true;
+
+		this.sendResponse(response);
+	}
+
+	protected attachRequest(response: DebugProtocol.AttachResponse, args: JdbAttachRequest): void {
+		if (!args.port) {
+			throw new Error("You must specify a port to which jdb will attach in your launch.json's attach configuration.");
+		}
+
+		this._debugger = JavaDebugger.attach(args.jdkPath, args.hostName, args.port);
+
+		this._debugger
+			.waitForInitialization()
+			.then(() => {
+				const debug = this._debugger as JavaDebugger;
+
+				this.sendResponse(response);
+
+				debug.help().then((data: string) => {
+					console.log(data); }
+				);
+			}
+		);
+	}
+
+  protected pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments): void {
+		pause(this.debugger, args.threadId)
+			.then((event) => {
+				this.sendEvent(event);
+			})
+	}
+
+	protected continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
+		resume(this.debugger, args.threadId)
+			.then((event) => {
+				this.sendEvent(event);
+			})
 	}
 
 	protected setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): void {
@@ -156,6 +201,8 @@ class MockDebugSession extends LoggingDebugSession {
 	}
 
 	protected threadsRequest(response: DebugProtocol.ThreadsResponse): void {
+		getThreads(this.debugger);
+
 
 		// return the default thread
 		response.body = {
@@ -241,18 +288,6 @@ class MockDebugSession extends LoggingDebugSession {
 			variables: variables
 		};
 		this.sendResponse(response);
-	}
-
-	protected continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
-
-		for (let ln = this._currentLine+1; ln < this._sourceLines.length; ln++) {
-			if (this.fireEventsForLine(response, ln)) {
-				return;
-			}
-		}
-		this.sendResponse(response);
-		// no more lines: run to end
-		this.sendEvent(new TerminatedEvent());
 	}
 
 	protected reverseContinueRequest(response: DebugProtocol.ReverseContinueResponse, args: DebugProtocol.ReverseContinueArguments) : void {

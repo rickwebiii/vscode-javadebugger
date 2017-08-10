@@ -60,10 +60,10 @@
 		],
 		"debuggers": [
 			{
-				"type": "mock",
-				"label": "Mock Debug",
+				"type": "java",
+				"label": "Java",
 
-				"program": "./out/mockDebug.js",
+				"program": "./out/JavaDebugSession.js",
 				"runtime": "node",
 
 				"variables": {
@@ -72,13 +72,13 @@
 
 				"configurationSnippets": [
 					{
-						"label": "Mock Debug: Launch",
+						"label": "Java: Attach",
 						"description": "A new configuration for launching a mock debug program",
 						"body": {
-							"type": "mock",
-							"request": "launch",
-							"name": "${2:Launch Program}",
-							"program": "^\"\\${workspaceRoot}/${1:Program}\""
+							"type": "java",
+							"request": "attach",
+							"name": "Java attach",
+							"port": 1234
 						}
 					}
 				],
@@ -101,6 +101,21 @@
 								"type": "boolean",
 								"description": "Enable logging of the Debug Adapter Protocol.",
 								"default": true
+							}
+						}
+					},
+					"attach": {
+						"required": [ "port", "jdkPath" ],
+						"properties": {
+							"port": {
+								"type": "number",
+								"description": "The port to which jdb will attach",
+								"default": 1234
+							},
+							"jdkPath": {
+								"type": "string",
+								"description": "Where the Java development kit is intalled (E.g. 'C:\\Program Files\\Java\\jdk1.8.0_131')",
+								"default": ""
 							}
 						}
 					}
