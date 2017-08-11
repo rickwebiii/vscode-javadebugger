@@ -11,7 +11,7 @@ import {
 	readFileSync
 } from 'fs';
 import {JdbAttachRequest} from './Contracts/AttachRequest';
-import {getThreadExecutionState, ThreadExecutionState} from './ExecutionControl';
+//import {getThreadExecutionState, ThreadExecutionState} from './ExecutionControl';
 import { Jdwp } from './Jdwp';
 
 /**
@@ -111,6 +111,7 @@ class MockDebugSession extends LoggingDebugSession {
 	}
 
   protected pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments): void {
+		//TODO: Figure out how to distinguish a request for pausing the last thread and pausing everything,
 		this.debugger.waitForInitialization()
 			.then(() => {
 				this.sendResponse(response);
@@ -208,10 +209,13 @@ class MockDebugSession extends LoggingDebugSession {
 	 * Returns a fake 'stacktrace' where every 'stackframe' is a word from the current line.
 	 */
 	protected stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
-		if (getThreadExecutionState(args.threadId) !== ThreadExecutionState.Paused) {
+		/*if (getThreadExecutionState(args.threadId) !== ThreadExecutionState.Paused) {
 			this.sendErrorResponse(response, 2023, 'No call stack available');
-		}
+		}*/
+		this.waitForDebugger()
+			.then(() => {
 
+			});
 
 /*
 		const words = this._sourceLines[this._currentLine].trim().split(/\s+/);
