@@ -4,18 +4,15 @@
 
 import {
 	DebugSession, LoggingDebugSession,
-	InitializedEvent, TerminatedEvent, StoppedEvent, BreakpointEvent, OutputEvent,
-	Thread, StackFrame, Scope, Source, Handles, Breakpoint
+	InitializedEvent, Breakpoint
 } from 'vscode-debugadapter';
 import {DebugProtocol} from 'vscode-debugprotocol';
 import {
 	readFileSync
 } from 'fs';
-import {basename} from 'path';
 import {JdbAttachRequest} from './Contracts/AttachRequest';
-import {JavaDebugger} from './JavaDebugger';
-import {pause, resume} from './ExecutionControl';
-import {getThreads} from './Threads';
+import {getThreadExecutionState, ThreadExecutionState} from './ExecutionControl';
+import { Jdwp } from './Jdwp';
 
 /**
  * This interface should always match the schema found in the mock-debug extension manifest.
@@ -34,43 +31,23 @@ export interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArgum
 
 class MockDebugSession extends LoggingDebugSession {
 
-	// we don't support multiple threads, so we can use a hardcoded ID for the default thread
-	private static THREAD_ID = 1;
-
-	// since we want to send breakpoint events, we will assign an id to every event
-	// so that the frontend can match events with breakpoints.
-	private _breakpointId = 1000;
-
-	// This is the next line that will be 'executed'
-	private __currentLine = 0;
-	private get _currentLine() : number {
-		return this.__currentLine;
-    }
-	private set _currentLine(line: number) {
-		this.__currentLine = line;
-		this.log('line', line);
-	}
-
-	// the initial (and one and only) file we are 'debugging'
-	private _sourceFile: string;
-
-	// the contents (= lines) of the one and only file
-	private _sourceLines = new Array<string>();
-
 	// maps from sourceFile to array of Breakpoints
 	private _breakPoints = new Map<string, DebugProtocol.Breakpoint[]>();
 
-	private _variableHandles = new Handles<string>();
+	private debuggerInstance: Jdwp | null = null;
 
-	private _debugger: JavaDebugger | null = null;
-
-	private get debugger(): JavaDebugger {
-		if (this._debugger === null) {
+	private get debugger(): Jdwp {
+		if (this.debuggerInstance === null) {
 			throw new Error("Bugcheck: no attached debugger.");
 		}
 
-		return this._debugger;
+		return this.debuggerInstance;
 	}
+
+	private set debugger(value: Jdwp) {
+		this.debuggerInstance = value;
+	}
+
 
 	/**
 	 * Creates a new debug adapter that is used for one debug session.
@@ -113,11 +90,8 @@ class MockDebugSession extends LoggingDebugSession {
 	}
 
 	protected disconnectRequest(response: DebugProtocol.DisconnectResponse, args: DebugProtocol.DisconnectArguments): void {
-		if (this._debugger) {
-			this._debugger.kill();
-		}
-
-		response.success = true;
+		this.debugger.detach();
+		this.debuggerInstance = null;
 
 		this.sendResponse(response);
 	}
@@ -127,34 +101,50 @@ class MockDebugSession extends LoggingDebugSession {
 			throw new Error("You must specify a port to which jdb will attach in your launch.json's attach configuration.");
 		}
 
-		this._debugger = JavaDebugger.attach(args.jdkPath, args.hostName, args.port);
+		this.debugger = new Jdwp(args.hostName, args.port);
 
-		this._debugger
-			.waitForInitialization()
+		this.waitForDebugger()
 			.then(() => {
-				const debug = this._debugger as JavaDebugger;
-
 				this.sendResponse(response);
-
-				debug.help().then((data: string) => {
-					console.log(data); }
-				);
 			}
 		);
 	}
 
   protected pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments): void {
-		pause(this.debugger, args.threadId)
-			.then((event) => {
-				this.sendEvent(event);
-			})
+		this.debugger.waitForInitialization()
+			.then(() => {
+				this.sendResponse(response);
+				//this.sendEvent(event);
+			});
 	}
 
 	protected continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
+		this.debugger.waitForInitialization()
+			.then(() => {
+			});
+			/*
 		resume(this.debugger, args.threadId)
 			.then((event) => {
+				this.sendResponse(response);
 				this.sendEvent(event);
-			})
+			})*/
+	}
+
+	private waitForDebugger(): Promise<{}> {
+		return new Promise((resolve) => {
+			const callback = () => {
+				if (!this.debuggerInstance) {
+					setTimeout(callback, 1);
+				} else {
+					resolve()
+				}
+			}
+
+			callback();
+		})
+		.then(() => {
+			return this.debugger.waitForInitialization();
+		});
 	}
 
 	protected setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): void {
@@ -188,7 +178,7 @@ class MockDebugSession extends LoggingDebugSession {
 				}
 			}
 			const bp = <DebugProtocol.Breakpoint> new Breakpoint(verified, this.convertDebuggerLineToClient(l));
-			bp.id = this._breakpointId++;
+			//bp.id = this._breakpointId++;
 			breakpoints.push(bp);
 		}
 		this._breakPoints.set(path, breakpoints);
@@ -201,23 +191,29 @@ class MockDebugSession extends LoggingDebugSession {
 	}
 
 	protected threadsRequest(response: DebugProtocol.ThreadsResponse): void {
-		getThreads(this.debugger);
-
-
-		// return the default thread
-		response.body = {
-			threads: [
-				new Thread(MockDebugSession.THREAD_ID, "thread 1")
-			]
-		};
-		this.sendResponse(response);
+		this.waitForDebugger()
+			.then(() => {
+				return this.debugger.getThreads();
+			})
+			.then((threads) => {
+				// return the default thread
+				response.body = {
+					threads: threads
+				};
+				this.sendResponse(response);
+			});
 	}
 
 	/**
 	 * Returns a fake 'stacktrace' where every 'stackframe' is a word from the current line.
 	 */
 	protected stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
+		if (getThreadExecutionState(args.threadId) !== ThreadExecutionState.Paused) {
+			this.sendErrorResponse(response, 2023, 'No call stack available');
+		}
 
+
+/*
 		const words = this._sourceLines[this._currentLine].trim().split(/\s+/);
 
 		const startFrame = typeof args.startFrame === 'number' ? args.startFrame : 0;
@@ -236,9 +232,10 @@ class MockDebugSession extends LoggingDebugSession {
 			stackFrames: frames,
 			totalFrames: words.length
 		};
-		this.sendResponse(response);
+		this.sendResponse(response);*/
 	}
 
+	/*
 	protected scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments): void {
 
 		const frameReference = args.frameId;
@@ -335,13 +332,14 @@ class MockDebugSession extends LoggingDebugSession {
 			variablesReference: 0
 		};
 		this.sendResponse(response);
-	}
+	}*/
 
 	//---- some helpers
 
 	/**
 	 * Fire StoppedEvent if line is not empty.
 	 */
+	/*
 	private fireStepEvent(response: DebugProtocol.Response, ln: number): boolean {
 
 		if (this._sourceLines[ln].trim().length > 0) {	// non-empty line
@@ -351,11 +349,12 @@ class MockDebugSession extends LoggingDebugSession {
 			return true;
 		}
 		return false;
-	}
+	}*/
 
 	/**
 	 * Fire StoppedEvent if line has a breakpoint or the word 'exception' is found.
 	 */
+	/*
 	private fireEventsForLine(response: DebugProtocol.Response, ln: number): boolean {
 
 		// find the breakpoints for the current source file
@@ -397,7 +396,7 @@ class MockDebugSession extends LoggingDebugSession {
 		const e = new OutputEvent(`${msg}: ${line}\n`);
 		(<DebugProtocol.OutputEvent>e).body.variablesReference = this._variableHandles.create("args");
 		this.sendEvent(e);	// print current line on debug console
-	}
+	}*/
 }
 
 DebugSession.run(MockDebugSession);

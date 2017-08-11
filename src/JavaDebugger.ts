@@ -1,4 +1,5 @@
 import {getPlatform, OperatingSystem} from './Utils/OperatingSystem';
+import {toHexString} from './Utils/Number';
 import {
 	join
 } from 'path';
@@ -6,6 +7,10 @@ import {
 	existsSync
 } from 'fs';
 import {execFile, ChildProcess} from 'child_process';
+import {
+	Thread, StackFrame
+} from 'vscode-debugadapter';
+import {Observer} from './Observer'
 
 /**
  * The relative path to jdb inside the jdk folder.
@@ -15,19 +20,26 @@ const jdbExecutableRelativePath = join(
 	getPlatform() === OperatingSystem.Windows ? 'jdb.exe' : 'jdb'
 );
 
-type Subscription = string;
+function isPromptString(stdout: string) {
+	const promptString = "> ";
+
+	// Prompts can be '> ' or threadname followed by the frame number.
+	// e.g. dw-admin-132-selector-ServerConnectorManager@305e4e9/38[3]
+	return stdout === promptString ||
+		/^\S+\[\d+\]$/.test(stdout);
+}
 
 // Returns whether or not the passed string has the command prompt in it and removes everything thereafter
 // if so.
 function stripCommandPrompt(stdout: string) {
-	const promptString = "> ";
+
 	const lines = stdout.split('\n');
 	let filteredStdout = "";
 
 	let containsPrompt = false;
 
 	for (let i = 0; i < lines.length; i++) {
-		if (lines[i] === promptString) {
+		if (isPromptString(stdout)) {
 			containsPrompt = true;
 			break;
 		} else {
@@ -40,69 +52,6 @@ function stripCommandPrompt(stdout: string) {
 		filteredStdout: filteredStdout
 	};
 }
-
-export class Observer<T> {
-	private subscriptions: {[key: string]: (value: T) => void} = Object.create(null);
-	private nextSubscription = 0;
-
-	constructor() {
-
-	}
-
-	/**
-	 * Keeps giving notifications until the callback returns true.
-	 * @param callback
-	 */
-	public until(callback: (value: T) => boolean) {
-		let subscription: Subscription | null = null;
-
-		const onNext = (value: T) => {
-			if (callback(value)) {
-				this.removeSubscription(subscription as Subscription);
-			}
-		}
-
-		subscription = this.subscribe(onNext);
-	}
-
-	/**
-	 * A one shot that subscribes to the next value and then unregisters the subscription.
-	 */
-	public next(callback: (value: T) => void) {
-		this.until((value) => {
-			callback(value);
-			return true;
-		})
-	}
-
-	public removeSubscription = (subscription: Subscription) => {
-		delete this.subscriptions[subscription];
-
-		console.log("removing " + subscription);
-	}
-
-	public subscribe = (callback: (value: T) => void): Subscription => {
-		const subscription = this.nextSubscription.toString();
-		this.nextSubscription++;
-
-		this.subscriptions[subscription] = callback;
-
-		console.log("subscribed " + subscription);
-
-		return subscription;
-	}
-
-	public publish = (value: T) => {
-		if (Object.keys(this.subscriptions).length === 0){
-			console.log("no subscribers", value);
-		}
-
-		for (let key in this.subscriptions) {
-			this.subscriptions[key](value);
-		}
-	}
-}
-
 export class JavaDebugger {
 	private jdbProcess: ChildProcess;
 	private stdoutObserver: Observer<string> = new Observer();
@@ -140,6 +89,7 @@ export class JavaDebugger {
 	}
 
 	private onStdout = (data: string) => {
+		console.log(data);
 		this.stdoutObserver.publish(data);
 	}
 
@@ -178,15 +128,42 @@ export class JavaDebugger {
 	}
 
 	public suspend(threadId: number): Promise<string> {
-		return this.runCommand(`suspend ${threadId}`);
+		return this.runCommand(`suspend ${toHexString(threadId)}`);
 	}
 
 	public resume(threadId: number): Promise<string> {
-		return this.runCommand(`resume ${threadId}`);
+		return this.runCommand(`resume ${toHexString(threadId)}`);
 	}
 
-	public getThreads(group: string): Promise<string> {
-		return this.runCommand(`threads ${group}`);
+	public getThreads(group: string): Promise<Thread[]> {
+		return this.runCommand(`threads ${group}`)
+			.then((threadString) => {
+				const threads = threadString.split('\r');
+				threads.shift();
+				threads.pop();
+
+				return threads.map((threadString) => {
+					const splits = threadString.split(/\s+/);
+
+					const matches = /0x.*/.exec(splits[1]);
+
+					if (!matches) {
+						throw new Error("couldn't parse thread");
+					}
+
+					const name = splits[2];
+					const threadNumber = parseInt(matches[matches.length - 1]);
+
+					return new Thread(threadNumber, name);
+				});
+			});
+	}
+
+	public getCallStack(threadId: number): Promise<StackFrame[]> {
+		return this.runCommand(`where ${toHexString(threadId)}`)
+			.then((stackTrace) => {
+				return [] as StackFrame[];
+			});
 	}
 
 	public static launch(jdkPath: string | undefined): JavaDebugger {
