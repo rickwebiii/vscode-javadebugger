@@ -4,6 +4,7 @@ const handshake = 'JDWP-Handshake';
 
 enum CommandSet {
 	VirtualMachine = 1,
+	ReferenceType = 2,
 	ThreadReference = 11
 };
 
@@ -17,12 +18,67 @@ enum VirtualMachineCommand {
 	Resumeapp = 9
 }
 
-enum ThreadReferenceCommand {
-	Name = 1
+enum ReferenceTypeCommand {
+	Methods = 5
 }
 
-enum Errors {
+enum ThreadReferenceCommand {
+	Name = 1,
+	Suspend = 2,
+	Resume = 3,
+	Frames = 6
+}
+
+export type MethodSpec = {
+	id: number,
+	name: string,
+	signature: string,
+	/**
+	 * TODO: Should be an enum?
+	 */
+	modBits: number;
+}
+
+export enum Errors {
+	ThreadNotSuspended = 13,
+	InvalidObject = 20,
 	VmDead = 112
+}
+
+export enum TypeTag {
+	Class = 1,
+	Interface = 2,
+	Array = 3
+}
+
+export type CodeLocation = {
+	type: TypeTag,
+	classId: number,
+	methodId: number,
+	/**
+	 * Index values are 8-bytes, so we pack it into a double. We should never do math with these,
+	 * as the values may be NaN or +-Infinity.
+	 */
+	index: number
+}
+
+export enum ClassStatus {
+	Verified = 1,
+	Prepared = 2,
+	Initialized = 4,
+	Error = 8
+}
+
+export type FrameSpec = {
+	id: number;
+	location: CodeLocation;
+}
+
+export type ClassSpec = {
+	type: TypeTag,
+	typeId: number,
+	signature: string,
+	status: ClassStatus
 }
 
 export type ResponseHeader = {
@@ -60,6 +116,70 @@ export function createListThreadsPacket(id: number) {
 	);
 }
 
+export function createListClassesPacket(id: number) {
+	return createPacket(
+		id,
+		CommandSet.VirtualMachine,
+		VirtualMachineCommand.AllClasses
+	);
+}
+
+export function createSuspendThreadPacket(id: number, threadId: number, threadIdSize: number) {
+	const payload = new Buffer(threadIdSize);
+	getIdWriteMethod(threadIdSize)(payload, threadId, 0);
+
+	return createPacket(
+		id,
+		CommandSet.ThreadReference,
+		ThreadReferenceCommand.Suspend,
+		payload
+	);
+}
+
+export function createThreadFramesPacket(
+	id: number,
+	threadId: number,
+	threadIdSize: number,
+	start: number,
+	count: number
+) {
+	const payload = new Buffer(threadIdSize + 8);
+	getIdWriteMethod(threadIdSize)(payload, threadId, 0);
+	payload.writeInt32BE(start, threadIdSize);
+	payload.writeInt32BE(count, threadIdSize + 4);
+
+	return createPacket(
+		id,
+		CommandSet.ThreadReference,
+		ThreadReferenceCommand.Frames,
+		payload
+	);
+}
+
+export function createResumeThreadPacket(id: number, threadId: number, threadIdSize: number) {
+	const payload = new Buffer(threadIdSize);
+	getIdWriteMethod(threadIdSize)(payload, threadId, 0);
+
+	return createPacket(
+		id,
+		CommandSet.ThreadReference,
+		ThreadReferenceCommand.Resume,
+		payload
+	);
+}
+
+export function createGetMethodsPacket(id: number, refId: number, refIdSize: number) {
+	const payload = new Buffer(refIdSize);
+	payload.writeInt32BE(refId, 0);
+
+	return createPacket(
+		id,
+		CommandSet.ReferenceType,
+		ReferenceTypeCommand.Methods,
+		payload
+	);
+}
+
 export function createIdSizesPacket(id: number) {
 	return createPacket(
 		id,
@@ -84,12 +204,124 @@ export function createResumeAppPacket(id: number) {
 	);
 }
 
+export function decodeGetMethodsResponse(response: ResponsePacket, methodIdSize: number): {[key: number]: MethodSpec} {
+	const count = response.data.readInt32BE(0);
+	const methods: {[key: number]: MethodSpec} = Object.create(null);
+	const getMethodId = getIdReadMethod(methodIdSize);
+
+	let currentOffset = 4;
+
+	// Methods appear as follows:
+	// (methodIdSize bytes) methodId
+	// (4 bytes) nameLen
+	// (nameLen bytes) name
+	// (4 bytes) sigLen
+	// (sigLen bytes) signature
+	// (4 bytes) modBits
+	for (let i = 0; i < count; i++) {
+		const methodId = getMethodId(response.data, currentOffset);
+		currentOffset += methodIdSize;
+		const nameLength = response.data.readInt32BE(currentOffset);
+		const name = unpackString(response.data.slice(currentOffset));
+		currentOffset += nameLength + 4;
+		const signatureLength = response.data.readInt32BE(currentOffset);
+		const signature = unpackString(response.data.slice(currentOffset));
+		currentOffset += signatureLength + 4;
+		const modBits = response.data.readInt32BE(currentOffset);
+		currentOffset += 4;
+
+		methods[methodId] ={
+			id: methodId,
+			name: name,
+			signature: signature,
+			modBits: modBits
+		};
+	}
+
+	return methods;
+}
+
+export function decodeAllClassesResponse(packet: ResponsePacket, refIdSize: number): {[key: number]: ClassSpec} {
+	const count = packet.data.readInt32BE(0);
+	const classes: {[key: number]: ClassSpec} = Object.create(null);
+	const readRefId = getIdReadMethod(refIdSize);
+
+	let nextOffset = 4;
+
+	// Classes appear as follows:
+	// (1 byte) tag
+	// (refIdSize bytes) refId
+	// (4 bytes) strlen
+	// (strlen bytes) signature
+	// (4 bytes) status
+	for (let i = 0; i < count; i++) {
+		const type = packet.data.readInt8(nextOffset);
+		nextOffset += 1;
+		const typeId = readRefId(packet.data, nextOffset);
+		nextOffset += refIdSize;
+		const signatureLength = packet.data.readInt32BE(nextOffset) + 4;
+		const signature = unpackString(packet.data.slice(nextOffset));
+		nextOffset += signatureLength;
+		const status = packet.data.readInt32BE(nextOffset);
+		nextOffset += 4;
+
+		classes[typeId] = {
+			type: type,
+			typeId: typeId,
+			signature: signature,
+			status: status
+		};
+	}
+
+	return classes;
+}
+
 export function decodeResumeAppResonse(packet: ResponsePacket): void {
-	return;
 }
 
 export function decodeSuspendAppResonse(packet: ResponsePacket): void {
-	return;
+}
+
+export function decodeResumeThreadResponse(packet: ResponsePacket): void {
+}
+
+export function decodeSuspendThreadResponse(packet: ResponsePacket): void {
+}
+
+export function decodeThreadFramesResponse(packet: ResponsePacket, idSizes: IdSizes): FrameSpec[] {
+	const count = packet.data.readInt32BE(0);
+	const frames: FrameSpec[] = [];
+	const frameReader = getIdReadMethod(idSizes.frameId);
+	const referenceReader = getIdReadMethod(idSizes.referenceTypeId);
+	const methodReader = getIdReadMethod(idSizes.methodId);
+
+	const frameIdOffset = 0;
+	const typeOffset = frameIdOffset + idSizes.frameId;
+	const classIdOffset = typeOffset + 1;
+	const methodIdOffset = classIdOffset + idSizes.referenceTypeId;
+	const indexOffset = methodIdOffset + idSizes.methodId;
+
+	// A frame consists of
+	// (frameIdSize) frameId
+	// (1 byte) tag
+	// (refIdSize) classId
+	// (methodIdSize) methodId
+	// (8 bytes) index
+	const frameSize = indexOffset + 8;
+
+	for (let i = 0; i < count; i++) {
+		frames.push({
+			id: frameReader(packet.data, 4 + i * frameSize),
+			location: {
+				type: packet.data.readInt8(4 + i * frameSize + typeOffset),
+				classId: referenceReader(packet.data, 4 + i * frameSize + classIdOffset),
+				methodId: methodReader(packet.data, 4 + i * frameSize + methodIdOffset),
+				index: packet.data.readDoubleBE(4 + i * frameSize + indexOffset)
+			}
+		});
+	}
+
+	return frames;
 }
 
 export function decodeIdSizesResponse(packet: ResponsePacket): IdSizes {
@@ -186,12 +418,13 @@ function readUInt64BE(buffer: Buffer, offset: number): number {
  * Unpacks a JDWP string and returns a Javascript utf-8 string.
  */
 function unpackString(stringBuffer: Buffer): string {
-	return stringBuffer.slice(4).toString()
+	const numBytes = stringBuffer.readInt32BE(0);
+
+	return stringBuffer.slice(4, 4 + numBytes).toString()
 }
 
 export function readResponse(packet: Buffer): ResponsePacket {
 	const length = packet.readInt32BE(0)
-	console.log(length, packet.slice(11, length).byteLength);
 
 	return {
 		length: length,

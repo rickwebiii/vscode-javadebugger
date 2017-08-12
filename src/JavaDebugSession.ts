@@ -2,10 +2,7 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
-import {
-	DebugSession, LoggingDebugSession,
-	InitializedEvent, Breakpoint
-} from 'vscode-debugadapter';
+import * as vscode from 'vscode-debugadapter';
 import {DebugProtocol} from 'vscode-debugprotocol';
 import {
 	readFileSync
@@ -13,6 +10,7 @@ import {
 import {JdbAttachRequest} from './Contracts/AttachRequest';
 //import {getThreadExecutionState, ThreadExecutionState} from './ExecutionControl';
 import { Jdwp } from './Jdwp';
+import {Errors} from './JdwpProtocol';
 
 /**
  * This interface should always match the schema found in the mock-debug extension manifest.
@@ -29,7 +27,7 @@ export interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArgum
 
 
 
-class MockDebugSession extends LoggingDebugSession {
+class MockDebugSession extends vscode.LoggingDebugSession {
 
 	// maps from sourceFile to array of Breakpoints
 	private _breakPoints = new Map<string, DebugProtocol.Breakpoint[]>();
@@ -70,7 +68,7 @@ class MockDebugSession extends LoggingDebugSession {
 		// since this debug adapter can accept configuration requests like 'setBreakpoint' at any time,
 		// we request them early by sending an 'initializeRequest' to the frontend.
 		// The frontend will end the configuration sequence by calling 'configurationDone' request.
-		this.sendEvent(new InitializedEvent());
+		this.sendEvent(new vscode.InitializedEvent());
 
 		response.body = response.body || {};
 
@@ -111,17 +109,43 @@ class MockDebugSession extends LoggingDebugSession {
 	}
 
   protected pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments): void {
-		//TODO: Figure out how to distinguish a request for pausing the last thread and pausing everything,
+		//TODO: Figure out how to distinguish a request for pausing the last thread and pausing everything.
 		this.debugger.waitForInitialization()
 			.then(() => {
-				this.sendResponse(response);
-				//this.sendEvent(event);
+				const lastThread = this.debugger.threads.reduce((prev, cur) => prev.id > cur.id ? prev : cur);
+
+				// If the last thread is specified, pause the whole app.
+				if (args.threadId === lastThread.id) {
+					this.debugger.suspendApp().then(() => {
+						this.sendResponse(response);
+						this.sendEvent(new vscode.StoppedEvent('paused', args.threadId));
+					});
+				} else {
+					this.debugger.suspendThread(args.threadId).then(() => {
+						this.sendResponse(response);
+						this.sendEvent(new vscode.StoppedEvent('thread paused', args.threadId));
+					});
+				}
 			});
 	}
 
 	protected continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
 		this.debugger.waitForInitialization()
 			.then(() => {
+				const lastThread = this.debugger.threads.reduce((prev, cur) => prev.id > cur.id ? prev : cur);
+
+				// If the last thread is specified, pause the whole app.
+				if (args.threadId === lastThread.id) {
+					this.debugger.resumeApp().then(() => {
+						this.sendResponse(response);
+						this.sendEvent(new vscode.ContinuedEvent(args.threadId, true));
+					});
+				} else {
+					this.debugger.resumeThread(args.threadId).then(() => {
+						this.sendResponse(response);
+						this.sendEvent(new vscode.ContinuedEvent(args.threadId, false));
+					});
+				}
 			});
 			/*
 		resume(this.debugger, args.threadId)
@@ -156,7 +180,7 @@ class MockDebugSession extends LoggingDebugSession {
 		// read file contents into array for direct access
 		const lines = readFileSync(path).toString().split('\n');
 
-		const breakpoints = new Array<Breakpoint>();
+		const breakpoints = new Array<vscode.Breakpoint>();
 
 		// verify breakpoint locations
 		for (let i = 0; i < clientLines.length; i++) {
@@ -178,7 +202,7 @@ class MockDebugSession extends LoggingDebugSession {
 					verified = true;    // this breakpoint has been validated
 				}
 			}
-			const bp = <DebugProtocol.Breakpoint> new Breakpoint(verified, this.convertDebuggerLineToClient(l));
+			const bp = <DebugProtocol.Breakpoint> new vscode.Breakpoint(verified, this.convertDebuggerLineToClient(l));
 			//bp.id = this._breakpointId++;
 			breakpoints.push(bp);
 		}
@@ -209,12 +233,19 @@ class MockDebugSession extends LoggingDebugSession {
 	 * Returns a fake 'stacktrace' where every 'stackframe' is a word from the current line.
 	 */
 	protected stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
-		/*if (getThreadExecutionState(args.threadId) !== ThreadExecutionState.Paused) {
-			this.sendErrorResponse(response, 2023, 'No call stack available');
-		}*/
 		this.waitForDebugger()
 			.then(() => {
+				this.debugger.getThreadFrames(args.threadId, args.startFrame, args.levels).then((frames) => {
+					response.body = {
+						stackFrames: frames,
+						totalFrames: frames.length
+					};
 
+					this.sendResponse(response);
+				});
+			})
+			.catch((error: Errors) => {
+				this.sendErrorResponse(response, error, `Got error code ${error} when requesting a backtrace`);
 			});
 
 /*
@@ -403,4 +434,4 @@ class MockDebugSession extends LoggingDebugSession {
 	}*/
 }
 
-DebugSession.run(MockDebugSession);
+vscode.DebugSession.run(MockDebugSession);

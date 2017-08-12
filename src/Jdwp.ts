@@ -26,6 +26,7 @@ export class Jdwp {
 	};
 	private currentPacket: protocol.ResponsePacket | null = null;
 	private threadsPrivate: vscode.Thread[] = [];
+	private classSpecs: {[key: number]: protocol.ClassSpec} = {};
 
 	constructor(host: string | undefined, port: number) {
 		this.host = host ? host : 'localhost';
@@ -63,6 +64,10 @@ export class Jdwp {
 
 						this.getObjectSizes().then((sizes) => {
 							this.idSizes = sizes;
+						}).then(() => {
+							return this.getClasses();
+						}).then((classSpecs) => {
+							this.classSpecs = classSpecs;
 							resolve();
 						});
 					} else {
@@ -121,6 +126,92 @@ export class Jdwp {
 		);
 	}
 
+	public getThreadFrames(
+		threadId: number,
+		start: number | undefined,
+		count: number | undefined
+	): Promise<vscode.StackFrame[]> {
+		if (start === undefined) {
+			start = 0;
+		}
+
+		count = -1;
+
+		return this.sendReceive(
+			requestId => protocol.createThreadFramesPacket(
+				requestId,
+				threadId,
+				this.idSizes.objectId,
+				start as number,
+				count as number
+			),
+			packet => protocol.decodeThreadFramesResponse(packet, this.idSizes)
+		).then((frames) => {
+			const promises: Promise<any>[] = [
+				Promise.resolve(frames),
+				this.getClasses()
+			];
+
+			/*
+			frames.forEach((frame) => {
+				promises.push(
+					this.getMethods(frame.location.classId)
+				);
+			});*/
+
+			return Promise.all(promises);
+		}).then((result) => {
+			const [frames, classes] = result;
+
+			const stackFrames: vscode.StackFrame[] = [];
+			const frameSpecs = frames as protocol.FrameSpec[];
+			const classSpecs = classes as {[key: number]: protocol.ClassSpec};
+			//const methodSpecs = methods as {[key: number]: protocol.MethodSpec}[];
+
+			for (let i = 0; i < frameSpecs.length; i++) {
+				const curFrame = frameSpecs[i];
+				const className = classSpecs[curFrame.location.classId].signature;
+				const formattedClassName = className.substr(1).split('/').join('.');
+				//const methodName = methodSpecs[i][curFrame.location.methodId].name;
+
+				stackFrames.push(new vscode.StackFrame(i, `${formattedClassName}:${curFrame.location.methodId}`))
+			}
+
+			return stackFrames;
+		});
+
+	}
+
+	public getClasses() {
+		return this.sendReceive(
+			requestId => protocol.createListClassesPacket(requestId),
+			response => protocol.decodeAllClassesResponse(response, this.idSizes.referenceTypeId)
+		);
+	}
+
+	public getMethods(typeId: number) {
+		return this.sendReceive(
+			requestId => protocol.createGetMethodsPacket(requestId, typeId, this.idSizes.referenceTypeId),
+			response => protocol.decodeGetMethodsResponse(response, this.idSizes.methodId)
+		);
+	}
+
+	public suspendThread(threadId: number) {
+		return this.sendReceive(
+			requestId => protocol.createSuspendThreadPacket(requestId, threadId, this.idSizes.objectId),
+			protocol.decodeSuspendThreadResponse
+		);
+	}
+
+	public resumeThread(threadId: number) {
+		return this.sendReceive(
+			requestId => protocol.createResumeThreadPacket(requestId, threadId, this.idSizes.objectId),
+			protocol.decodeResumeThreadResponse
+		);
+	}
+
+	public getThread
+
 	public detach() {
 		this.initializedPromise = null;
 		this.socket.end();
@@ -135,22 +226,27 @@ export class Jdwp {
 		getRequest: (requestId: number) => Buffer,
 		decodeResponse: (response: protocol.ResponsePacket) => T
 	): Promise<T> {
-		// Jdwp really hates parallel requests and will lock up if issue such.
-		// So we sequentialize all requests.
-		this.lastRequest = this.lastRequest.then(() => {
+		const sendAndReceive = () => {
 			return new Promise<T>((resolve, reject) => {
 				const requestId = this.packetId++;
 				const request = getRequest(requestId);
 
 				this.getResponse(requestId).then((response) => {
-					console.log('receive ', requestId);
-					resolve(decodeResponse(response));
+					if (response.errorCode !== 0) {
+						console.error(request);
+						reject(response.errorCode);
+					} else {
+						resolve(decodeResponse(response));
+					}
 				});
 
-				console.log('send ', requestId);
 				this.socket.write(request);
 			});
-		});
+		}
+
+		// Jdwp really hates parallel requests and will lock up if issue such.
+		// So we sequentialize all requests.
+		this.lastRequest = this.lastRequest.then(sendAndReceive, sendAndReceive);
 
 		return this.lastRequest;
 	}
