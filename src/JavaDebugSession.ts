@@ -10,7 +10,7 @@ import {
 import {JdbAttachRequest} from './Contracts/AttachRequest';
 //import {getThreadExecutionState, ThreadExecutionState} from './ExecutionControl';
 import { Jdwp } from './Jdwp';
-import {Errors} from './JdwpProtocol';
+import {Errors} from './Protocol/JdwpProtocol';
 
 /**
  * This interface should always match the schema found in the mock-debug extension manifest.

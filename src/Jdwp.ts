@@ -1,6 +1,6 @@
 import {createConnection, Socket} from 'net';
 import {Observer} from './Observer';
-import * as protocol from './JdwpProtocol';
+import * as protocol from './Protocol/JdwpProtocol';
 import * as vscode from 'vscode-debugadapter';
 
 export enum AppState {
@@ -14,7 +14,6 @@ export class Jdwp {
 	private socket: Socket;
 	private incommingDataObserver: Observer<protocol.ResponsePacket>;
 	private packetId: number = 0;
-	//private appState: AppState = AppState.Running;
 	private lastRequest: Promise<any> = Promise.resolve();
 	private initializedPromise: Promise<any> | null = null;
 	private idSizes: protocol.IdSizes = {
@@ -26,7 +25,6 @@ export class Jdwp {
 	};
 	private currentPacket: protocol.ResponsePacket | null = null;
 	private threadsPrivate: vscode.Thread[] = [];
-	private classSpecs: {[key: number]: protocol.ClassSpec} = {};
 
 	constructor(host: string | undefined, port: number) {
 		this.host = host ? host : 'localhost';
@@ -64,10 +62,6 @@ export class Jdwp {
 
 						this.getObjectSizes().then((sizes) => {
 							this.idSizes = sizes;
-						}).then(() => {
-							return this.getClasses();
-						}).then((classSpecs) => {
-							this.classSpecs = classSpecs;
 							resolve();
 						});
 					} else {
@@ -135,9 +129,16 @@ export class Jdwp {
 			start = 0;
 		}
 
+		// If you specify more frames than exist for a given stack trace, jdwp returns an error.
+		// We have two options here:
+		// 1) Use the API to get a frame count first and taking the max of the requested and that.
+		// 2) Always get all the frames and filter down to the number requested.
+		// TODO: do one of the above.
 		count = -1;
 
-		return this.sendReceive(
+		// Be ready for a great journey. We need a bunch of stuff in scope at once to translate
+		// the location of each frame.
+		return this.sendReceive( // Request the stack frames for the current thread
 			requestId => protocol.createThreadFramesPacket(
 				requestId,
 				threadId,
@@ -146,40 +147,116 @@ export class Jdwp {
 				count as number
 			),
 			packet => protocol.decodeThreadFramesResponse(packet, this.idSizes)
-		).then((frames) => {
+		).then((frames) => { // Look up all classes and method name for each frame
 			const promises: Promise<any>[] = [
 				Promise.resolve(frames),
 				this.getClasses()
 			];
 
-			/*
 			frames.forEach((frame) => {
 				promises.push(
-					this.getMethods(frame.location.classId)
+						this.getMethods(frame.location.classId)
 				);
-			});*/
+			});
 
+			// The promises will resolve in the order we assigned them. First come
+			// the frames, then the classes, then an array of methods for each frame.
 			return Promise.all(promises);
-		}).then((result) => {
-			const [frames, classes] = result;
+		}).then((result) => { // Destructure our promise array and request the line table for each method
+			const [frames, classes, ...methods] = result;
 
 			const stackFrames: vscode.StackFrame[] = [];
 			const frameSpecs = frames as protocol.FrameSpec[];
 			const classSpecs = classes as {[key: number]: protocol.ClassSpec};
-			//const methodSpecs = methods as {[key: number]: protocol.MethodSpec}[];
+			const methodSpecs = methods as {[key: number]: protocol.MethodSpec}[];
 
-			for (let i = 0; i < frameSpecs.length; i++) {
-				const curFrame = frameSpecs[i];
-				const className = classSpecs[curFrame.location.classId].signature;
-				const formattedClassName = className.substr(1).split('/').join('.');
-				//const methodName = methodSpecs[i][curFrame.location.methodId].name;
+			const promises = frameSpecs.map((frame) => {
+				return this.getMethodLineTable(frame.location.classId, frame.location.methodId)
+			}) as Promise<protocol.LineTable>[]
 
-				stackFrames.push(new vscode.StackFrame(i, `${formattedClassName}:${curFrame.location.methodId}`))
-			}
 
-			return stackFrames;
+			return Promise.all(promises).then((lineTables) => { // Fetch line informatio
+				const promises = frameSpecs.map((frame) => {
+					return this.getSourceFile(frame.location.classId);
+				});
+
+				return Promise.all(promises).then((sources) => { // Fetch filename information.
+					for (let i = 0; i < frameSpecs.length; i++) {
+						const curFrame = frameSpecs[i];
+						const className = classSpecs[curFrame.location.classId].signature;
+						const formattedClassName = className.substr(1).split('/').join('.');
+						const methodName = methodSpecs[i][curFrame.location.methodId].name;
+
+						let sourceFile = sources[i] ?
+							new vscode.Source(sources[i] as string) :
+							undefined;
+
+						const lineNumber =  lineTables[i].isNative || lineTables[i].isFucky ?
+							undefined :
+							protocol.lookupLine(lineTables[i], curFrame.location.index);
+
+						stackFrames.push(new vscode.StackFrame(i, `${formattedClassName}:${methodName}`, sourceFile, lineNumber))
+					}
+
+					return stackFrames;
+				});
+			})
 		});
 
+	}
+
+	public getSourceFile(classId: number): Promise<string | undefined> {
+		return this.sendReceive(
+			requestId => protocol.createGetSourceFilePacket(requestId, classId, this.idSizes.referenceTypeId),
+			response => protocol.decodeGetSourceFileResponse(response)
+		).catch((errCode) => {
+			if (errCode === protocol.Errors.AbsentInformation) {
+				return undefined;
+			} else {
+				throw errCode;
+			}
+		})
+	}
+
+	public getMethodLineTable(classId: number, methodId: number): Promise<protocol.LineTable> {
+		return this.sendReceive(
+			requestId => protocol.createLineTablePacket(
+				requestId,
+				classId,
+				this.idSizes.referenceTypeId,
+				methodId,
+				this.idSizes.methodId
+			),
+			response => protocol.decodeLineTableResponse(response)
+		).catch((errorCode) => {
+			// The docs don't mention returning a NativeMethod error when trying to get
+			// line information for a native function, but this does seem to be the case.
+			// If we get such an error, construct an object indicating such
+			if (errorCode === protocol.Errors.NativeMethod) {
+				return {
+					start: -1,
+					end: -1,
+					isNative: true,
+					isFucky: false,
+					lines: []
+				};
+			} else {
+				throw errorCode;
+			}
+		})
+	}
+
+	public getThisObject(threadId: number, frameId: number) {
+		return this.sendReceive(
+			requestId => protocol.createGetThisObjectPacket(
+				requestId,
+				threadId,
+				this.idSizes.objectId,
+				frameId,
+				this.idSizes.frameId
+			),
+			response => protocol.decodeGetThisObjectResponse(response, this.idSizes.objectId)
+		)
 	}
 
 	public getClasses() {
@@ -187,6 +264,17 @@ export class Jdwp {
 			requestId => protocol.createListClassesPacket(requestId),
 			response => protocol.decodeAllClassesResponse(response, this.idSizes.referenceTypeId)
 		);
+	}
+
+	public getReflectedType(classId: number) {
+		return this.sendReceive(
+			requestId => protocol.createGetReflectedTypePacket(
+				requestId,
+				classId,
+				this.idSizes.objectId
+			),
+			response => protocol.decodeGetReflectedTypeResponse(response, this.idSizes.objectId)
+		)
 	}
 
 	public getMethods(typeId: number) {
@@ -231,7 +319,7 @@ export class Jdwp {
 				const requestId = this.packetId++;
 				const request = getRequest(requestId);
 
-				this.getResponse(requestId).then((response) => {
+				const receivePromise = this.getResponse(requestId).then((response) => {
 					if (response.errorCode !== 0) {
 						console.error(request);
 						reject(response.errorCode);
@@ -241,6 +329,8 @@ export class Jdwp {
 				});
 
 				this.socket.write(request);
+
+				return receivePromise
 			});
 		}
 
