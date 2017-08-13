@@ -230,7 +230,7 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 	}
 
 	/**
-	 * Returns a fake 'stacktrace' where every 'stackframe' is a word from the current line.
+	 * Get the stack traces in the app.
 	 */
 	protected stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
 		this.waitForDebugger()
@@ -247,28 +247,12 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 			.catch((error: Errors) => {
 				this.sendErrorResponse(response, error, `Got error code ${error} when requesting a backtrace`);
 			});
-
-/*
-		const words = this._sourceLines[this._currentLine].trim().split(/\s+/);
-
-		const startFrame = typeof args.startFrame === 'number' ? args.startFrame : 0;
-		const maxLevels = typeof args.levels === 'number' ? args.levels : words.length-startFrame;
-		const endFrame = Math.min(startFrame + maxLevels, words.length);
-
-		const frames = new Array<StackFrame>();
-		// every word of the current line becomes a stack frame.
-		for (let i= startFrame; i < endFrame; i++) {
-			const name = words[i];	// use a word of the line as the stackframe name
-			frames.push(new StackFrame(i, `${name}(${i})`, new Source(basename(this._sourceFile),
-				this.convertDebuggerPathToClient(this._sourceFile)),
-				this.convertDebuggerLineToClient(this._currentLine), 0));
-		}
-		response.body = {
-			stackFrames: frames,
-			totalFrames: words.length
-		};
-		this.sendResponse(response);*/
 	}
+
+	protected sourceRequest(response: DebugProtocol.SourceResponse, args: DebugProtocol.SourceArguments): void {
+		console.log('ass');
+	}
+
 
 	/*
 	protected scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments): void {

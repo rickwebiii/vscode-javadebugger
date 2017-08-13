@@ -1,7 +1,8 @@
+import * as vscode from 'vscode';
 import {createConnection, Socket} from 'net';
 import {Observer} from './Observer';
 import * as protocol from './Protocol/JdwpProtocol';
-import * as vscode from 'vscode-debugadapter';
+import * as vscodedebug from 'vscode-debugadapter';
 
 export enum AppState {
 	Suspended,
@@ -24,7 +25,7 @@ export class Jdwp {
 		frameId: 0
 	};
 	private currentPacket: protocol.ResponsePacket | null = null;
-	private threadsPrivate: vscode.Thread[] = [];
+	private threadsPrivate: vscodedebug.Thread[] = [];
 
 	constructor(host: string | undefined, port: number) {
 		this.host = host ? host : 'localhost';
@@ -82,13 +83,13 @@ export class Jdwp {
 		);
 	}
 
-	public getThreads(): Promise<vscode.Thread[]> {
+	public getThreads(): Promise<vscodedebug.Thread[]> {
 		const decode = (packet) => { return protocol.decodeListThreadsResponse(packet, this.idSizes.objectId); }
 
 		return this.sendReceive(protocol.createListThreadsPacket, decode).then((threadIds) => {
 			const promises = threadIds.map((threadId) => {
 				return this.getThreadName(threadId).then((threadName) => {
-					return new vscode.Thread(threadId, threadName)
+					return new vscodedebug.Thread(threadId, threadName)
 				});
 			});
 
@@ -124,7 +125,7 @@ export class Jdwp {
 		threadId: number,
 		start: number | undefined,
 		count: number | undefined
-	): Promise<vscode.StackFrame[]> {
+	): Promise<vscodedebug.StackFrame[]> {
 		if (start === undefined) {
 			start = 0;
 		}
@@ -165,7 +166,7 @@ export class Jdwp {
 		}).then((result) => { // Destructure our promise array and request the line table for each method
 			const [frames, classes, ...methods] = result;
 
-			const stackFrames: vscode.StackFrame[] = [];
+			const stackFrames: vscodedebug.StackFrame[] = [];
 			const frameSpecs = frames as protocol.FrameSpec[];
 			const classSpecs = classes as {[key: number]: protocol.ClassSpec};
 			const methodSpecs = methods as {[key: number]: protocol.MethodSpec}[];
@@ -177,7 +178,18 @@ export class Jdwp {
 
 			return Promise.all(promises).then((lineTables) => { // Fetch line informatio
 				const promises = frameSpecs.map((frame) => {
-					return this.getSourceFile(frame.location.classId);
+					return this.getSourceFile(frame.location.classId).then((source) => {
+						if (source) {
+							return vscode.workspace.findFiles(source, '').then((paths) => {
+								return {source: source as string | undefined, paths: paths}
+							});
+						} else {
+							return {
+								source: source,
+								paths: []
+							}
+						};
+					});
 				});
 
 				return Promise.all(promises).then((sources) => { // Fetch filename information.
@@ -187,15 +199,17 @@ export class Jdwp {
 						const formattedClassName = className.substr(1).split('/').join('.');
 						const methodName = methodSpecs[i][curFrame.location.methodId].name;
 
-						let sourceFile = sources[i] ?
-							new vscode.Source(sources[i] as string) :
+						const source = sources[i];
+
+						let sourceFile = source.paths.length > 0 ?
+							new vscodedebug.Source(sources[i].source as string, source.paths[0].toString()) :
 							undefined;
 
 						const lineNumber =  lineTables[i].isNative || lineTables[i].isFucky ?
 							undefined :
 							protocol.lookupLine(lineTables[i], curFrame.location.index);
 
-						stackFrames.push(new vscode.StackFrame(i, `${formattedClassName}:${methodName}`, sourceFile, lineNumber))
+						stackFrames.push(new vscodedebug.StackFrame(i, `${formattedClassName}:${methodName}`, sourceFile, lineNumber))
 					}
 
 					return stackFrames;
