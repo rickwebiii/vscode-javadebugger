@@ -1,4 +1,4 @@
-import * as vscode from 'vscode';
+//import * as vscode from 'vscode';
 import {createConnection, Socket} from 'net';
 import {Observer} from './Observer';
 import * as protocol from './Protocol/JdwpProtocol';
@@ -26,11 +26,13 @@ export class Jdwp {
 	};
 	private currentPacket: protocol.ResponsePacket | null = null;
 	private threadsPrivate: vscodedebug.Thread[] = [];
+	private fileInWorkspace: {[key: string]: string[]}
 
-	constructor(host: string | undefined, port: number) {
+	constructor(host: string | undefined, port: number, filesInWorkspace: {[key: string]: string[]}) {
 		this.host = host ? host : 'localhost';
 		this.port = port;
 		this.incommingDataObserver = new Observer<protocol.ResponsePacket>();
+		this.fileInWorkspace = filesInWorkspace;
 	}
 
 	public get threads() {
@@ -180,15 +182,16 @@ export class Jdwp {
 				const promises = frameSpecs.map((frame) => {
 					return this.getSourceFile(frame.location.classId).then((source) => {
 						if (source) {
-							return vscode.workspace.findFiles(source, '').then((paths) => {
-								return {source: source as string | undefined, paths: paths}
-							});
+							return {
+								source: source,
+								paths: this.fileInWorkspace[source]
+							}
 						} else {
 							return {
 								source: source,
 								paths: []
 							}
-						};
+						}
 					});
 				});
 
@@ -201,7 +204,7 @@ export class Jdwp {
 
 						const source = sources[i];
 
-						let sourceFile = source.paths.length > 0 ?
+						let sourceFile = source.paths && source.paths.length > 0 ?
 							new vscodedebug.Source(sources[i].source as string, source.paths[0].toString()) :
 							undefined;
 

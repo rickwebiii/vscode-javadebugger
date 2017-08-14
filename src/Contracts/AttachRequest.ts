@@ -15,4 +15,6 @@ export interface JdbAttachRequest extends DebugProtocol.AttachRequest {
 	 * The hostname where the JVM resides. If undefined, the debugger will assume localhost
 	 */
 	hostName: string | undefined;
+
+	workspaceRoot: string;
 }

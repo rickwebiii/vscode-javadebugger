@@ -1,37 +1,26 @@
-import {readdir, stat} from 'fs';
-import {resolve} from 'path';
+import * as glob from 'glob';
+import {basename} from 'path';
 
-export function recursivelyFindFile(filename: string, basePath: string): Promise<string[]> {
-	let paths: string[] = [];
-	return new Promise((resolvePromise, reject) => {
-		readdir(basePath, (err, files) => {
-			let numFilesToExamine = files.length;
-
-			files.forEach((file) => {
-				const filePath = resolve(file);
-
-				if (file === filename) {
-					paths.push(filePath);
-				}
-
-				stat(filePath, (err, stats) => {
-					if (stats.isDirectory) {
-						recursivelyFindFile(filename, filePath).then((subPaths) => {
-							if (subPaths.length > 0) {
-								paths = paths.concat(subPaths);
-							}
-
-							if (--numFilesToExamine === 0) {
-							resolve(paths);
-							}
-						})
-					} else {
-						if (--numFilesToExamine === 0) {
-							resolve(paths);
-						}
-					}
-				})
-			});
-		});
+export function recursivelyFindFiles(filename: string, basePath: string): Promise<string[]> {
+	return new Promise((resolve, reject) => {
+		glob(basePath + '/**/' + filename, function(err, files) {
+			resolve(files);
+		})
 	});
+}
+
+export function createFileMap(files: string[]): {[key:string]: string[]} {
+	const map: {[key: string]: string[]} = Object.create(null);
+
+	files.forEach((file) => {
+		const fileName = basename(file);
+
+		if (fileName in map) {
+			map[fileName].push(file);
+		} else {
+			map[fileName] = [file];
+		}
+	});
+
+	return map;
 }

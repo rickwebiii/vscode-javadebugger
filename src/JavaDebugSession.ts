@@ -2,6 +2,8 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
+'use strict';
+
 import * as vscode from 'vscode-debugadapter';
 import {DebugProtocol} from 'vscode-debugprotocol';
 import {
@@ -11,6 +13,7 @@ import {JdbAttachRequest} from './Contracts/AttachRequest';
 //import {getThreadExecutionState, ThreadExecutionState} from './ExecutionControl';
 import { Jdwp } from './Jdwp';
 import {Errors} from './Protocol/JdwpProtocol';
+import {recursivelyFindFiles, createFileMap} from './Utils/FileSystem';
 
 /**
  * This interface should always match the schema found in the mock-debug extension manifest.
@@ -23,9 +26,6 @@ export interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArgum
 	/** enable logging the Debug Adapter Protocol */
 	trace?: boolean;
 }
-
-
-
 
 class MockDebugSession extends vscode.LoggingDebugSession {
 
@@ -99,13 +99,17 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 			throw new Error("You must specify a port to which jdb will attach in your launch.json's attach configuration.");
 		}
 
-		this.debugger = new Jdwp(args.hostName, args.port);
+		recursivelyFindFiles('*.java', args.workspaceRoot).then((files) => {
+			const fileMap = createFileMap(files);
 
-		this.waitForDebugger()
-			.then(() => {
-				this.sendResponse(response);
-			}
-		);
+			this.debugger = new Jdwp(args.hostName, args.port as number, fileMap);
+
+			this.waitForDebugger()
+				.then(() => {
+					this.sendResponse(response);
+				}
+			);
+		})
 	}
 
   protected pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments): void {
@@ -147,12 +151,6 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 					});
 				}
 			});
-			/*
-		resume(this.debugger, args.threadId)
-			.then((event) => {
-				this.sendResponse(response);
-				this.sendEvent(event);
-			})*/
 	}
 
 	private waitForDebugger(): Promise<{}> {
