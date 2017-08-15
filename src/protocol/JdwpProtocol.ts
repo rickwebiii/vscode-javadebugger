@@ -9,6 +9,7 @@ export * from './StackFrame';
 export * from './ReferenceType';
 export * from './ClassObjectReference';
 export * from './Method';
+export * from './EventRequest';
 
 export function createHandshakePacket(): Buffer {
 	return new Buffer(handshake);

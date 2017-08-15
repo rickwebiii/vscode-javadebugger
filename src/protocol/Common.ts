@@ -1,4 +1,5 @@
 export enum Errors {
+	InvalidThread = 10,
 	ThreadNotSuspended = 13,
 	InvalidObject = 20,
 	InvalidClass = 21,

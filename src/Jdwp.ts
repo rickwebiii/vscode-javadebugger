@@ -28,6 +28,9 @@ export class Jdwp {
 	private threadsPrivate: vscodedebug.Thread[] = [];
 	private fileInWorkspace: {[key: string]: string[]}
 
+	public readonly threadStarted: Observer<number>;
+	public readonly threadEnded: Observer<number>;
+
 	constructor(host: string | undefined, port: number, filesInWorkspace: {[key: string]: string[]}) {
 		this.host = host ? host : 'localhost';
 		this.port = port;
@@ -42,40 +45,56 @@ export class Jdwp {
 	public waitForInitialization = (): Promise<{}> => {
 		if (!this.initializedPromise) {
 			this.initializedPromise = new Promise((resolve, reject) => {
-				this.socket = createConnection(
-					this.port,
-					this.host,
-					() => {
-						console.log('connecting...');
-						this.socket.write(protocol.createHandshakePacket());
-					}
-				);
-
-				this.socket.setKeepAlive(true);
-				this.socket.setNoDelay(true);
-
-				this.socket.on('error', this.socketError);
-				this.socket.on('close', this.onClose);
-				this.socket.on('drain', () => console.log('drain'))
-				this.socket.once('data', (buffer) => {
-					if (protocol.isHandshakePacket(buffer)) {
-						console.log('connected!');
-
-						this.socket.on('data', this.receiveData);
-
-						this.getObjectSizes().then((sizes) => {
-							this.idSizes = sizes;
-							resolve();
-						});
-					} else {
-						console.log('uh oh');
-						reject();
-					}
-				});
+				 this.connect().then(() => {
+					 return this.postConnect();
+				 }).then(() => {
+					 resolve();
+				 })
 			});
 		}
 
 		return this.initializedPromise;
+	}
+
+	private connect() {
+		return new Promise<{}>((resolve, reject) => {
+			this.socket = createConnection(
+				this.port,
+				this.host,
+				() => {
+					console.log('connecting...');
+					this.socket.write(protocol.createHandshakePacket());
+				}
+			);
+
+			this.socket.setKeepAlive(true);
+			this.socket.setNoDelay(true);
+
+			this.socket.on('error', this.socketError);
+			this.socket.on('close', this.onClose);
+			this.socket.on('drain', () => console.log('drain'))
+			this.socket.once('data', (buffer) => {
+				if (protocol.isHandshakePacket(buffer)) {
+					console.log('connected!');
+
+					this.socket.on('data', this.receiveData);
+					resolve();
+				} else {
+					console.log('Failed to connect.');
+					reject();
+				}
+			});
+		});
+	}
+
+	private postConnect() {
+		return this.getObjectSizes().then((sizes) => {
+			this.idSizes = sizes;
+		}).then(() => {
+			return this.setEvent(protocol.EventKind.ThreadStart, protocol.SuspendPolicy.None);
+		}).then(() => {
+			return this.setEvent(protocol.EventKind.ThreadEnd, protocol.SuspendPolicy.None);
+		});
 	}
 
 	private getObjectSizes(): Promise<protocol.IdSizes> {
@@ -313,6 +332,13 @@ export class Jdwp {
 			requestId => protocol.createResumeThreadPacket(requestId, threadId, this.idSizes.objectId),
 			protocol.decodeResumeThreadResponse
 		);
+	}
+
+	public setEvent(eventKind: protocol.EventKind, suspendPolicy: protocol.SuspendPolicy) {
+		return this.sendReceive(
+			requestId => protocol.createSetEventPacket(requestId, eventKind, suspendPolicy),
+			protocol.decodeSetEventResponse
+		)
 	}
 
 	public getThread

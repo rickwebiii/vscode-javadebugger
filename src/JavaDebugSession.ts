@@ -122,12 +122,24 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 				if (args.threadId === lastThread.id) {
 					this.debugger.suspendApp().then(() => {
 						this.sendResponse(response);
-						this.sendEvent(new vscode.StoppedEvent('paused', args.threadId));
+						this.sendEvent(new vscode.StoppedEvent('pause', args.threadId));
+					}).catch((errorCode) => {
+						if (errorCode === Errors.VmDead) {
+							this.sendEvent(new vscode.TerminatedEvent());
+						} else {
+							throw errorCode;
+						}
 					});
 				} else {
 					this.debugger.suspendThread(args.threadId).then(() => {
 						this.sendResponse(response);
-						this.sendEvent(new vscode.StoppedEvent('thread paused', args.threadId));
+						this.sendEvent(new vscode.StoppedEvent('pause', args.threadId));
+					}).catch((errorCode) => {
+						if (errorCode === Errors.InvalidObject) { // Thread may have terminated by the time we ask to suspend it
+							this.sendEvent(new vscode.ThreadEvent('exited', args.threadId))
+						} else {
+							throw errorCode;
+						}
 					});
 				}
 			});
@@ -233,7 +245,7 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 	protected stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments): void {
 		this.waitForDebugger()
 			.then(() => {
-				this.debugger.getThreadFrames(args.threadId, args.startFrame, args.levels).then((frames) => {
+				return this.debugger.getThreadFrames(args.threadId, args.startFrame, args.levels).then((frames) => {
 					response.body = {
 						stackFrames: frames,
 						totalFrames: frames.length
@@ -243,7 +255,12 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 				});
 			})
 			.catch((error: Errors) => {
-				this.sendErrorResponse(response, error, `Got error code ${error} when requesting a backtrace`);
+				if (error === Errors.InvalidThread) { // If we're requesting a stack trace for a dead thread, tell VSCode
+					this.sendEvent(new vscode.ThreadEvent('exited', args.threadId));
+					this.sendResponse(response);
+				} else {
+					this.sendErrorResponse(response, error, `Got error code ${error} when requesting a backtrace`);
+				}
 			});
 	}
 

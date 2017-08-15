@@ -1,0 +1,14 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+        {
+            "type": "java",
+            "request": "attach",
+            "name": "Java attach",
+            "debugServer": 4711,
+            "port": 12345,
+            "jdkPath": "C:\\Program Files\\Java\\jdk1.8.0_131\\",
+            "workspaceRoot": "${workspaceRoot}"
+          }
+    ]
+}

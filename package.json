@@ -26,7 +26,7 @@
 	"dependencies": {
 		"vscode-debugprotocol": "^1.22.0",
 		"vscode-debugadapter": "^1.22.0",
-        "glob": "7.1.2"
+		"glob": "7.1.2"
 	},
 	"devDependencies": {
 		"@types/es6-collections": "^0.5.29",
@@ -49,8 +49,7 @@
 		"postinstall": "node ./node_modules/vscode/bin/install"
 	},
 	"main": "./out/extension",
-	"activationEvents": [
-	],
+	"activationEvents": [],
 	"contributes": {
 		"breakpoints": [
 			{
@@ -61,14 +60,11 @@
 			{
 				"type": "java",
 				"label": "Java",
-
 				"program": "./out/JavaDebugSession.js",
 				"runtime": "node",
-
 				"variables": {
 					"AskForProgramName": "extension.mock-debug.getProgramName"
 				},
-
 				"configurationSnippets": [
 					{
 						"label": "Java: Attach",
@@ -81,10 +77,11 @@
 						}
 					}
 				],
-
 				"configurationAttributes": {
 					"launch": {
-						"required": [ "program" ],
+						"required": [
+							"program"
+						],
 						"properties": {
 							"program": {
 								"type": "string",
@@ -104,7 +101,10 @@
 						}
 					},
 					"attach": {
-						"required": [ "port", "jdkPath" ],
+						"required": [
+							"port",
+							"jdkPath"
+						],
 						"properties": {
 							"port": {
 								"type": "number",
