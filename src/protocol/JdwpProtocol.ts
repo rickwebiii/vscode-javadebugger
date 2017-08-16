@@ -10,6 +10,7 @@ export * from './ReferenceType';
 export * from './ClassObjectReference';
 export * from './Method';
 export * from './EventRequest';
+export * from './Event';
 
 export function createHandshakePacket(): Buffer {
 	return new Buffer(handshake);

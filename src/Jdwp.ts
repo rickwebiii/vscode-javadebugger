@@ -13,7 +13,7 @@ export class Jdwp {
 	private host: string;
 	private port: number;
 	private socket: Socket;
-	private incommingDataObserver: Observer<protocol.ResponsePacket>;
+	private incomingDataObserver: Observer<protocol.ResponsePacket>;
 	private packetId: number = 0;
 	private lastRequest: Promise<any> = Promise.resolve();
 	private initializedPromise: Promise<any> | null = null;
@@ -28,13 +28,12 @@ export class Jdwp {
 	private threadsPrivate: vscodedebug.Thread[] = [];
 	private fileInWorkspace: {[key: string]: string[]}
 
-	public readonly threadStarted: Observer<number>;
-	public readonly threadEnded: Observer<number>;
+	public readonly events: Observer<protocol.Event>;
 
 	constructor(host: string | undefined, port: number, filesInWorkspace: {[key: string]: string[]}) {
 		this.host = host ? host : 'localhost';
 		this.port = port;
-		this.incommingDataObserver = new Observer<protocol.ResponsePacket>();
+		this.incomingDataObserver = new Observer<protocol.ResponsePacket>();
 		this.fileInWorkspace = filesInWorkspace;
 	}
 
@@ -94,6 +93,8 @@ export class Jdwp {
 			return this.setEvent(protocol.EventKind.ThreadStart, protocol.SuspendPolicy.None);
 		}).then(() => {
 			return this.setEvent(protocol.EventKind.ThreadEnd, protocol.SuspendPolicy.None);
+		}).then(() => {
+			return this.listenForEvents();
 		});
 	}
 
@@ -386,7 +387,7 @@ export class Jdwp {
 
 	private getResponse(requestId: number): Promise<protocol.ResponsePacket> {
 		return new Promise((resolve) => {
-			this.incommingDataObserver.until((response) => {
+			this.incomingDataObserver.until((response) => {
 				if (response.id === requestId) {
 					try {
 						resolve(response);
@@ -400,6 +401,12 @@ export class Jdwp {
 		});
 	}
 
+	private listenForEvents = () => {
+		// Subscription will die with this object, so no need to clean up.
+		this.incomingDataObserver.subscribe((response) => {
+
+		})
+	}
 
 	private socketError = (err: Error) => {
 		console.log(err);
@@ -421,6 +428,6 @@ export class Jdwp {
 			this.currentPacket = null;
 		}
 
-		this.incommingDataObserver.publish(packet);
+		this.incomingDataObserver.publish(packet);
 	}
 }
