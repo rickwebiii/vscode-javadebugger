@@ -1,5 +1,5 @@
 import {SuspendPolicy, EventKind} from './EventRequest';
-import {ResponsePacket, getIdReadMethod} from './Common';
+import {RequestPacket, getIdReadMethod} from './Common';
 import {IdSizes} from './VirtualMachine';
 
 // Since no particular sent packet directly facilitates one of these responses, we expose these
@@ -7,31 +7,18 @@ import {IdSizes} from './VirtualMachine';
 export const eventCommandSet = 64;
 export const compositeCommand = 100;
 
-export abstract class Event {
-	suspendPolicy: SuspendPolicy;
-	requestId: number;
-
-	constructor(suspendPolicy: SuspendPolicy, requestId: number) {
-		this.suspendPolicy = suspendPolicy;
-		this.requestId = requestId;
-	}
+export interface DebuggerEvent {
+	kind: EventKind,
+	suspendPolicy: SuspendPolicy,
+	requestId: number
 }
 
-abstract class ThreadEvent extends Event {
+export interface ThreadEvent extends DebuggerEvent {
 	threadId: number;
-
-	constructor(suspendPolicy: SuspendPolicy, requestId: number, threadId: number) {
-		super(suspendPolicy, requestId);
-
-		this.threadId = threadId;
-	}
 }
-
-export class ThreadDeathEvent extends ThreadEvent {}
-export class ThreadStartEvent extends ThreadEvent {}
 
 type ParseEventResult = {
-	event: Event,
+	event: DebuggerEvent,
 	newOffset: number;
 }
 
@@ -39,11 +26,13 @@ type ParseEventResult = {
  * The Java debugger protocol shits everything out as a composite event; a sequence of
  * one or more actual events. This method decodes and returns an array of said events.
  */
-export function decodeCompositeEvent(response: ResponsePacket, idSizes: IdSizes): Event[] {
+export function decodeCompositeEvent(response: RequestPacket, idSizes: IdSizes): DebuggerEvent[] {
+	console.log(response.data.length);
+
 	const payload = response.data;
 	const suspendPolicy = payload.readInt8(0) as SuspendPolicy;
 	const numEvents = payload.readInt32BE(1);
-	const events: Event[] = [];
+	const events: DebuggerEvent[] = [];
 	let currentOffset = 5;
 
 	for (let i = 0; i < numEvents; i++) {
@@ -67,7 +56,7 @@ export function decodeCompositeEvent(response: ResponsePacket, idSizes: IdSizes)
 				break;
 
 			case EventKind.ThreadEnd:
-				result = parseThreadDeathEvent(
+				result = 	parseThreadDeathEvent(
 					payload,
 					currentOffset,
 					suspendPolicy,
@@ -95,8 +84,15 @@ function parseThreadStartEvent(
 	const requestId = payload.readInt32BE(offset);
 	const threadId = getIdReadMethod(threadIdSize)(payload, offset + 4);
 
+	const threadEvent: ThreadEvent = {
+		kind: EventKind.ThreadStart,
+		suspendPolicy: suspendPolicy,
+		requestId: requestId,
+		threadId: threadId
+	}
+
 	return {
-		event: new ThreadStartEvent(suspendPolicy, requestId, threadId),
+		event: threadEvent,
 		newOffset: offset + threadIdSize + 4
 	};
 }
@@ -110,8 +106,17 @@ function parseThreadDeathEvent(
 	const requestId = payload.readInt32BE(offset);
 	const threadId = getIdReadMethod(threadIdSize)(payload, offset + 4);
 
+	console.log(requestId)
+
+	const threadEvent: ThreadEvent = {
+		kind: EventKind.ThreadEnd,
+		suspendPolicy: suspendPolicy,
+		requestId: requestId,
+		threadId: threadId
+	}
+
 	return {
-		event: new ThreadDeathEvent(suspendPolicy, requestId, threadId),
+		event: threadEvent,
 		newOffset: offset + threadIdSize + 4
 	};
 }

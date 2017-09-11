@@ -13,7 +13,7 @@ export class Jdwp {
 	private host: string;
 	private port: number;
 	private socket: Socket;
-	private incomingDataObserver: Observer<protocol.ResponsePacket>;
+	private incomingDataObserver: Observer<protocol.ResponsePacket | protocol.RequestPacket>;
 	private packetId: number = 0;
 	private lastRequest: Promise<any> = Promise.resolve();
 	private initializedPromise: Promise<any> | null = null;
@@ -28,12 +28,12 @@ export class Jdwp {
 	private threadsPrivate: vscodedebug.Thread[] = [];
 	private fileInWorkspace: {[key: string]: string[]}
 
-	public readonly events: Observer<protocol.Event>;
+	public readonly eventObserver  = new Observer<protocol.DebuggerEvent>();
 
 	constructor(host: string | undefined, port: number, filesInWorkspace: {[key: string]: string[]}) {
 		this.host = host ? host : 'localhost';
 		this.port = port;
-		this.incomingDataObserver = new Observer<protocol.ResponsePacket>();
+		this.incomingDataObserver = new Observer<protocol.ResponsePacket | protocol.RequestPacket>();
 		this.fileInWorkspace = filesInWorkspace;
 	}
 
@@ -90,9 +90,9 @@ export class Jdwp {
 		return this.getObjectSizes().then((sizes) => {
 			this.idSizes = sizes;
 		}).then(() => {
-			return this.setEvent(protocol.EventKind.ThreadStart, protocol.SuspendPolicy.None);
+			return this.setEvent(protocol.EventKind.ThreadStart, protocol.SuspendPolicy.None, []);
 		}).then(() => {
-			return this.setEvent(protocol.EventKind.ThreadEnd, protocol.SuspendPolicy.None);
+			return this.setEvent(protocol.EventKind.ThreadEnd, protocol.SuspendPolicy.None, []);
 		}).then(() => {
 			return this.listenForEvents();
 		});
@@ -335,14 +335,16 @@ export class Jdwp {
 		);
 	}
 
-	public setEvent(eventKind: protocol.EventKind, suspendPolicy: protocol.SuspendPolicy) {
+	public setEvent(
+		eventKind: protocol.EventKind,
+		suspendPolicy: protocol.SuspendPolicy,
+		eventModifiers: protocol.EventModifier[]
+	) {
 		return this.sendReceive(
-			requestId => protocol.createSetEventPacket(requestId, eventKind, suspendPolicy),
+			requestId => protocol.createSetEventPacket(requestId, eventKind, suspendPolicy, eventModifiers),
 			protocol.decodeSetEventResponse
 		)
 	}
-
-	public getThread
 
 	public detach() {
 		this.initializedPromise = null;
@@ -387,10 +389,11 @@ export class Jdwp {
 
 	private getResponse(requestId: number): Promise<protocol.ResponsePacket> {
 		return new Promise((resolve) => {
-			this.incomingDataObserver.until((response) => {
-				if (response.id === requestId) {
+			this.incomingDataObserver.until((packet) => {
+				if (packet.flags & protocol.PacketFlags.Response &&
+				    packet.id === requestId) {
 					try {
-						resolve(response);
+						resolve(packet as protocol.ResponsePacket);
 					} finally {
 						return true;
 					}
@@ -403,8 +406,24 @@ export class Jdwp {
 
 	private listenForEvents = () => {
 		// Subscription will die with this object, so no need to clean up.
-		this.incomingDataObserver.subscribe((response) => {
+		this.incomingDataObserver.subscribe((packet) => {
+			console.log('kitty');
+			if (!protocol.packetIsResponse(packet)) {
+				const request = packet as protocol.RequestPacket;
 
+				console.log(packet);
+
+				if (
+					request.commandSet === protocol.eventCommandSet &&
+					request.command === protocol.compositeCommand
+				) {
+					const events = protocol.decodeCompositeEvent(request, this.idSizes);
+
+					events.forEach((event) => {
+						this.eventObserver.publish(event);
+					})
+				}
+			}
 		})
 	}
 
@@ -413,9 +432,10 @@ export class Jdwp {
 	}
 
 	private receiveData = (data: Buffer) => {
+		console.log('doggie');
 		let packet;
 		if (this.currentPacket === null) {
-			packet = protocol.readResponse(data);
+			packet = protocol.readReceivedPacket(data);
 		} else { // If this is continuation of the previous packet, append it to the previous packet.
 			packet = this.currentPacket;
 			packet.data = Buffer.concat([this.currentPacket.data, data]);

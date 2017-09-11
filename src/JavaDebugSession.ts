@@ -6,14 +6,12 @@
 
 import * as vscode from 'vscode-debugadapter';
 import {DebugProtocol} from 'vscode-debugprotocol';
-import {
-	readFileSync
-} from 'fs';
 import {JdbAttachRequest} from './Contracts/AttachRequest';
 //import {getThreadExecutionState, ThreadExecutionState} from './ExecutionControl';
 import { Jdwp } from './Jdwp';
-import {Errors} from './Protocol/JdwpProtocol';
 import {recursivelyFindFiles, createFileMap} from './Utils/FileSystem';
+import * as protocol from './protocol/JdwpProtocol';
+import {Subscription} from './Observer';
 
 /**
  * This interface should always match the schema found in the mock-debug extension manifest.
@@ -30,9 +28,8 @@ export interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArgum
 class MockDebugSession extends vscode.LoggingDebugSession {
 
 	// maps from sourceFile to array of Breakpoints
-	private _breakPoints = new Map<string, DebugProtocol.Breakpoint[]>();
-
 	private debuggerInstance: Jdwp | null = null;
+	private eventSubscription: Subscription | null = null;
 
 	private get debugger(): Jdwp {
 		if (this.debuggerInstance === null) {
@@ -53,10 +50,6 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 	 */
 	public constructor() {
 		super("mock-debug.txt");
-
-		// this debugger uses zero-based lines and columns
-		this.setDebuggerLinesStartAt1(false);
-		this.setDebuggerColumnsStartAt1(false);
 	}
 
 	/**
@@ -81,6 +74,8 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 		// make VS Code to show a 'step back' button
 		response.body.supportsStepBack = true;
 
+		response.body.supportsConditionalBreakpoints = true;
+
 		this.sendResponse(response);
 	}
 
@@ -103,6 +98,7 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 			const fileMap = createFileMap(files);
 
 			this.debugger = new Jdwp(args.hostName, args.port as number, fileMap);
+			this.eventSubscription = this.debugger.eventObserver.subscribe(this.onEvent);
 
 			this.waitForDebugger()
 				.then(() => {
@@ -113,9 +109,21 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 	}
 
   protected pauseRequest(response: DebugProtocol.PauseResponse, args: DebugProtocol.PauseArguments): void {
-		//TODO: Figure out how to distinguish a request for pausing the last thread and pausing everything.
+		// TODO: VsCode always sends a thread id, even when the user requests to pause the whole app.
+		// as such, all we can do is
 		this.debugger.waitForInitialization()
 			.then(() => {
+				this.debugger.suspendApp().then(() => {
+					this.syncThreads().then(() => {
+						this.sendResponse(response);
+
+						this.debugger.threads.forEach((thread) => {
+							this.sendEvent(new vscode.StoppedEvent('pause', thread.id));
+						});
+					});
+				});
+
+				/*
 				const lastThread = this.debugger.threads.reduce((prev, cur) => prev.id > cur.id ? prev : cur);
 
 				// If the last thread is specified, pause the whole app.
@@ -124,7 +132,7 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 						this.sendResponse(response);
 						this.sendEvent(new vscode.StoppedEvent('pause', args.threadId));
 					}).catch((errorCode) => {
-						if (errorCode === Errors.VmDead) {
+						if (errorCode === protocol.Errors.VmDead) {
 							this.sendEvent(new vscode.TerminatedEvent());
 						} else {
 							throw errorCode;
@@ -135,19 +143,24 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 						this.sendResponse(response);
 						this.sendEvent(new vscode.StoppedEvent('pause', args.threadId));
 					}).catch((errorCode) => {
-						if (errorCode === Errors.InvalidObject) { // Thread may have terminated by the time we ask to suspend it
+						if (errorCode === protocol.Errors.InvalidObject) { // Thread may have terminated by the time we ask to suspend it
 							this.sendEvent(new vscode.ThreadEvent('exited', args.threadId))
 						} else {
 							throw errorCode;
 						}
 					});
-				}
+			}*/
 			});
 	}
 
 	protected continueRequest(response: DebugProtocol.ContinueResponse, args: DebugProtocol.ContinueArguments): void {
 		this.debugger.waitForInitialization()
 			.then(() => {
+				this.debugger.resumeApp().then(() => {
+					this.sendResponse(response);
+					this.sendEvent(new vscode.ContinuedEvent(args.threadId, true));
+				});
+				/*
 				const lastThread = this.debugger.threads.reduce((prev, cur) => prev.id > cur.id ? prev : cur);
 
 				// If the last thread is specified, pause the whole app.
@@ -161,7 +174,7 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 						this.sendResponse(response);
 						this.sendEvent(new vscode.ContinuedEvent(args.threadId, false));
 					});
-				}
+				}*/
 			});
 	}
 
@@ -183,45 +196,19 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 	}
 
 	protected setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): void {
+		this.debugger.getClasses().then((classes) => {
+			classes
+		})
 
-		const path = <string>args.source.path;
-		const clientLines = args.lines || [];
 
-		// read file contents into array for direct access
-		const lines = readFileSync(path).toString().split('\n');
 
-		const breakpoints = new Array<vscode.Breakpoint>();
+		this.debugger.setEvent(
+			protocol.EventKind.Breakpoint,
+			protocol.SuspendPolicy.All,
+			[
+			]
+		);
 
-		// verify breakpoint locations
-		for (let i = 0; i < clientLines.length; i++) {
-			let l = this.convertClientLineToDebugger(clientLines[i]);
-			let verified = false;
-			if (l < lines.length) {
-				const line = lines[l].trim();
-				// if a line is empty or starts with '+' we don't allow to set a breakpoint but move the breakpoint down
-				if (line.length === 0 || line.indexOf("+") === 0) {
-					l++;
-				}
-				// if a line starts with '-' we don't allow to set a breakpoint but move the breakpoint up
-				if (line.indexOf("-") === 0) {
-					l--;
-				}
-				// don't set 'verified' to true if the line contains the word 'lazy'
-				// in this case the breakpoint will be verified 'lazy' after hitting it once.
-				if (line.indexOf("lazy") < 0) {
-					verified = true;    // this breakpoint has been validated
-				}
-			}
-			const bp = <DebugProtocol.Breakpoint> new vscode.Breakpoint(verified, this.convertDebuggerLineToClient(l));
-			//bp.id = this._breakpointId++;
-			breakpoints.push(bp);
-		}
-		this._breakPoints.set(path, breakpoints);
-
-		// send back the actual breakpoint positions
-		response.body = {
-			breakpoints: breakpoints
-		};
 		this.sendResponse(response);
 	}
 
@@ -254,10 +241,11 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 					this.sendResponse(response);
 				});
 			})
-			.catch((error: Errors) => {
-				if (error === Errors.InvalidThread) { // If we're requesting a stack trace for a dead thread, tell VSCode
-					this.sendEvent(new vscode.ThreadEvent('exited', args.threadId));
-					this.sendResponse(response);
+			.catch((error: protocol.Errors) => {
+				if (error === protocol.Errors.InvalidThread) { // If we're requesting a stack trace for a dead thread, tell VSCode
+					this.syncThreads().then(() => {
+						this.sendResponse(response);
+					})
 				} else {
 					this.sendErrorResponse(response, error, `Got error code ${error} when requesting a backtrace`);
 				}
@@ -268,6 +256,46 @@ class MockDebugSession extends vscode.LoggingDebugSession {
 		console.log('ass');
 	}
 
+	private onEvent = (event: protocol.DebuggerEvent) => {
+		switch (event.kind) {
+			case protocol.EventKind.ThreadEnd:
+				this.onThreadDeathEvent(event as protocol.ThreadEvent);
+				break;
+			case protocol.EventKind.ThreadStart:
+				this.onThreadStartEvent(event as protocol.ThreadEvent);
+				break;
+			default:
+				console.warn('Unhandled event', event);
+		}
+	}
+
+	private onThreadDeathEvent(event: protocol.ThreadEvent) {
+		this.syncThreads();
+	}
+
+	private onThreadStartEvent(event: protocol.ThreadEvent) {
+		this.syncThreads();
+	}
+
+	private syncThreads() {
+		const currentThreads = this.debugger.threads;
+
+		return this.debugger.getThreads().then((nextThreads) => {
+			// Find threads that no longer exist
+			currentThreads.forEach((thread) => {
+				if (!nextThreads.some(otherThread => otherThread.id === thread.id)) {
+					this.sendEvent(new vscode.ThreadEvent('exited', thread.id))
+				}
+			});
+
+			// Find threads that are new
+			nextThreads.forEach((thread) => {
+				if (!currentThreads.some(otherThread => otherThread.id === thread.id)) {
+					this.sendEvent(new vscode.ThreadEvent('started', thread.id));
+				}
+			});
+		});
+	}
 
 	/*
 	protected scopesRequest(response: DebugProtocol.ScopesResponse, args: DebugProtocol.ScopesArguments): void {

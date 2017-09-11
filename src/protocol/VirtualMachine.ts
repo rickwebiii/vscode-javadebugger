@@ -1,4 +1,4 @@
-import {TypeTag, createPacket, ResponsePacket, unpackString, getIdReadMethod} from './Common';
+import {ObjectType, createPacket, ResponsePacket, unpackString, getIdReadMethod} from './Common';
 
 export type IdSizes = {
 	fieldId: number;
@@ -28,7 +28,7 @@ export enum ClassStatus {
 }
 
 export type ClassSpec = {
-	type: TypeTag,
+	type: ObjectType,
 	typeId: number,
 	signature: string,
 	status: ClassStatus

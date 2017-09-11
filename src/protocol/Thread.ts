@@ -3,7 +3,7 @@ import {
 	getIdWriteMethod,
 	createPacket,
 	ResponsePacket,
-	TypeTag,
+	CodeLocation,
 	unpackString
 } from './Common';
 
@@ -18,17 +18,6 @@ enum Command {
 	Suspend = 2,
 	Resume = 3,
 	Frames = 6
-}
-
-export type CodeLocation = {
-	type: TypeTag,
-	classId: number,
-	methodId: number,
-	/**
-	 * Index values are 8-bytes, so we pack it into a double. We should never do math with these,
-	 * as the values may be NaN or +-Infinity.
-	 */
-	index: number
 }
 
 export type FrameSpec = {

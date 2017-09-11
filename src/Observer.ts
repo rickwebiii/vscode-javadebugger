@@ -1,4 +1,4 @@
-type Subscription = string;
+export type Subscription = string;
 
 export class Observer<T> {
 	private subscriptions: {[key: string]: (value: T) => void} = Object.create(null);

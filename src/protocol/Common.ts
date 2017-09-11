@@ -1,3 +1,5 @@
+import {IdSizes} from './VirtualMachine';
+
 export enum Errors {
 	InvalidThread = 10,
 	ThreadNotSuspended = 13,
@@ -8,14 +10,30 @@ export enum Errors {
 	NativeMethod = 511
 }
 
-export type ResponseHeader = {
+export enum PacketFlags {
+	Response = 0x80
+}
+
+export function packetIsResponse(header: PacketHeader) {
+	return header.flags & PacketFlags.Response;
+}
+
+export type PacketHeader = {
 	length: number,
 	id: number,
-	flags: number,
+	flags: PacketFlags
+}
+
+export type ResponseHeader = PacketHeader & {
 	errorCode: Errors
 }
 
-export enum TypeTag {
+export type RequestHeader = PacketHeader & {
+	commandSet: number,
+	command: number
+}
+
+export enum ObjectType {
 	Class = 1,
 	Interface = 2,
 	Array = 3
@@ -25,12 +43,43 @@ export type ResponsePacket = ResponseHeader & {
 	data: Buffer
 }
 
+export type RequestPacket = RequestHeader & {
+	data: Buffer
+}
+
 export type TaggedObjectId = {
-	tag: TypeTag,
+	tag: ObjectType,
 	id: number
 }
 
-export function createPacket<CommandType extends number>(
+export type CodeLocation = {
+	type: ObjectType,
+	classId: number,
+	methodId: number,
+	/**
+	 * Index values are 8-bytes, so we pack it into a double. We should never do math with these,
+	 * as the values may be NaN or +-Infinity.
+	 */
+	index: number
+}
+
+/**
+ * Serializes a code location to a buffer.
+ * @param codeLocation The code location to serialize
+ * @param idSizes The sizes of all the id types in this jdwp session
+ */
+export function serializeCodeLocation(codeLocation: CodeLocation, idSizes: IdSizes): Buffer {
+	const buffer = new Buffer(1 + idSizes.referenceTypeId + idSizes.methodId + 8);
+
+	buffer.writeInt8(codeLocation.type, 0);
+	getIdWriteMethod(idSizes.referenceTypeId)(buffer, codeLocation.classId, 1);
+	getIdWriteMethod(idSizes.methodId)(buffer, codeLocation.methodId, 1 + idSizes.referenceTypeId);
+	buffer.writeDoubleBE(codeLocation.index, 1 + idSizes.referenceTypeId + idSizes.methodId);
+
+	return buffer;
+}
+
+export function createPacket<CommandType extends number> (
 	id: number,
 	commandSet: number,
 	command: CommandType,
@@ -56,6 +105,18 @@ export function unpackString(stringBuffer: Buffer): string {
 	const numBytes = stringBuffer.readInt32BE(0);
 
 	return stringBuffer.slice(4, 4 + numBytes).toString()
+}
+
+/**
+ * Packs a Utf-8 string into a Buffer.
+ * @param str The string to pack
+ */
+export function packString(str: string): Buffer {
+	const buffer = new Buffer(str.length + 4);
+	buffer.writeInt32BE(str.length, 0);
+	buffer.write(str, 4);
+
+	return buffer;
 }
 
 export function readTaggedObjectId(buffer: Buffer, objectIdSize: number): TaggedObjectId {

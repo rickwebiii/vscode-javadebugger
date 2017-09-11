@@ -20,15 +20,27 @@ export function isHandshakePacket(buffer: Buffer) {
 	return buffer.toString() === handshake
 }
 
-export function readResponse(packet: Buffer): common.ResponsePacket {
+export function readReceivedPacket(packet: Buffer): common.ResponsePacket | common.RequestPacket {
 	const length = packet.readInt32BE(0)
 
-	return {
+	const commonHeader: common.PacketHeader = {
 		length: length,
 		id: packet.readInt32BE(4),
 		flags: packet.readInt8(8),
-		errorCode: packet.readInt16BE(9),
-		data: packet.slice(11, length)
+	};
+
+	if (common.packetIsResponse(commonHeader)) {
+		return {
+			...commonHeader,
+			errorCode: packet.readInt16BE(9),
+			data: packet.slice(11, length)
+		};
+	} else {
+		return {
+			...commonHeader,
+			commandSet: packet.readInt8(9),
+			command: packet.readInt8(10),
+			data: packet.slice(11, length)
+		};
 	}
 }
-
